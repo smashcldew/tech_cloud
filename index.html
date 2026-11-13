@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="version" content="1.1.0">
+<meta name="version" content="1.2.1">
 <title>科技脈絡圖</title>
 <style>
   :root { color-scheme: dark; }
@@ -105,7 +105,10 @@ const nodes = RAW_NODES.map(([id, name, domain, cat, year, desc]) => {
     phase: Math.random() * Math.PI * 2,
     speed: 0.6 + Math.random() * 0.8,
     ins: [], outs: [], deg: 0,
-    a: 1, ta: 1, match: true
+    a: 1, ta: 1, match: true,
+    rx: 0, ry: 0,           // 畫面上實際顯示的位置（物理位置加上聚集位移）
+    g: 0, gv: 0,            // 聚集程度（0 = 在原位，1 = 聚到焦點旁）與其彈簧速度
+    ox: 0, oy: 0            // 聚集時的目標位置
   };
   byId[id] = n;
   domainCount[domain] = (domainCount[domain] || 0) + 1;
@@ -244,6 +247,41 @@ function step(t, dtScale) {
   }
 }
 
+/* ========== 聚集：選取節點時，相關節點收攏到它身邊；取消後歸位 ========== */
+function updateGather(t) {
+  const f = selected;
+  let set = null;
+  if (f) {
+    set = new Set(f.ins.concat(f.outs));
+    // 前置技術排在上方弧線，衍生技術排在下方弧線（時間由上往下）
+    const place = (list, up) => {
+      const k = list.length;
+      if (!k) return;
+      const sorted = list.slice().sort((a, b) => a.x - b.x);
+      const rr = Math.max(80, 24 * k + 46) * Math.max(S, 0.9); // 手機上也要留足夠間距給文字
+      sorted.forEach((n, i) => {
+        const ang = (up ? Math.PI : 0) + (Math.PI * (i + 1)) / (k + 1);
+        const ring = rr + (k > 5 && i % 2 ? 58 * Math.max(S, 0.9) : 0);
+        const wob = reduceMotion ? 0 : 5;
+        const px = f.rx + Math.cos(ang) * ring * 1.2 + Math.cos(t * 0.0011 * n.speed + n.phase) * wob;
+        n.ox = Math.max(44, Math.min(W - 60, px)); // 不要被擠出螢幕外
+        n.oy = f.ry + Math.sin(ang) * ring * 0.85 + Math.sin(t * 0.0009 * n.speed + n.phase) * wob;
+      });
+    };
+    place(f.ins, true);
+    place(f.outs, false);
+  }
+  for (const n of nodes) {
+    const gt = set && set.has(n) ? 1 : 0;
+    // 帶一點彈性的彈簧：收攏時會微微過頭再回彈
+    n.gv = n.gv * 0.8 + (gt - n.g) * 0.09;
+    n.g += n.gv;
+    if (n.g < 0 || (gt === 0 && n.g < 0.002 && Math.abs(n.gv) < 0.002)) { n.g = 0; n.gv = 0; }
+    n.rx = n.x + (n.ox - n.x) * n.g;
+    n.ry = n.y + (n.oy - n.y) * n.g;
+  }
+}
+
 /* ========== 篩選 / 高亮 ========== */
 function currentFocus() { return hover || selected; }
 
@@ -312,24 +350,24 @@ function drawLinks(t) {
   for (const l of links) {
     if (l.a < 0.01) continue;
     const { s, t: e } = l;
-    if ((s.y < lo && e.y < lo) || (s.y > hi && e.y > hi)) continue;
-    const g = ctx.createLinearGradient(s.x, s.y, e.x, e.y);
+    if ((s.ry < lo && e.ry < lo) || (s.ry > hi && e.ry > hi)) continue;
+    const g = ctx.createLinearGradient(s.rx, s.ry, e.rx, e.ry);
     g.addColorStop(0, "rgba(" + CATS[s.cat].rgb + "," + l.a + ")");
     g.addColorStop(1, "rgba(" + CATS[e.cat].rgb + "," + l.a + ")");
     const active = focus && (s === focus || e === focus);
     ctx.strokeStyle = g;
     ctx.lineWidth = active ? 2 : 1.1;
     ctx.beginPath();
-    ctx.moveTo(s.x, s.y);
-    ctx.lineTo(e.x, e.y);
+    ctx.moveTo(s.rx, s.ry);
+    ctx.lineTo(e.rx, e.ry);
     ctx.stroke();
 
     if (active) {
-      const dx = e.x - s.x, dy = e.y - s.y;
+      const dx = e.rx - s.rx, dy = e.ry - s.ry;
       const d = Math.hypot(dx, dy) || 1;
       const nx = dx / d, ny = dy / d;
       // 箭頭
-      const ax = e.x - nx * (radius(e) + 5), ay = e.y - ny * (radius(e) + 5);
+      const ax = e.rx - nx * (radius(e) + 5), ay = e.ry - ny * (radius(e) + 5);
       ctx.fillStyle = "rgba(255,255,255," + (0.85 * l.a) + ")";
       ctx.beginPath();
       ctx.moveTo(ax, ay);
@@ -341,7 +379,7 @@ function drawLinks(t) {
       const p = ((t * 0.0003 + l.i * 0.13) % 1);
       ctx.fillStyle = "rgba(255,255,255," + (0.9 * l.a) + ")";
       ctx.beginPath();
-      ctx.arc(s.x + dx * p, s.y + dy * p, 2.2, 0, Math.PI * 2);
+      ctx.arc(s.rx + dx * p, s.ry + dy * p, 2.2, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -354,13 +392,13 @@ function drawNode(n, t) {
   if (a < 0.01) return;
 
   // 外層光暈
-  const g = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 2.8);
+  const g = ctx.createRadialGradient(n.rx, n.ry, 0, n.rx, n.ry, r * 2.8);
   g.addColorStop(0, "rgba(" + c.rgb + "," + 0.5 * a + ")");
   g.addColorStop(0.45, "rgba(" + c.rgb + "," + 0.16 * a + ")");
   g.addColorStop(1, "rgba(" + c.rgb + ",0)");
   ctx.fillStyle = g;
   ctx.beginPath();
-  ctx.arc(n.x, n.y, r * 2.8, 0, Math.PI * 2);
+  ctx.arc(n.rx, n.ry, r * 2.8, 0, Math.PI * 2);
   ctx.fill();
 
   // 雲朵：幾個會緩慢蠕動的圓疊在一起
@@ -368,19 +406,19 @@ function drawNode(n, t) {
   for (let k = 0; k < 3; k++) {
     const ang = t * 0.0009 * n.speed + n.phase + k * 2.1;
     ctx.beginPath();
-    ctx.arc(n.x + Math.cos(ang) * r * 0.42, n.y + Math.sin(ang * 1.3) * r * 0.34, r * 0.78, 0, Math.PI * 2);
+    ctx.arc(n.rx + Math.cos(ang) * r * 0.42, n.ry + Math.sin(ang * 1.3) * r * 0.34, r * 0.78, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.fillStyle = "rgba(" + c.rgb + "," + 0.95 * a + ")";
   ctx.beginPath();
-  ctx.arc(n.x, n.y, r * 0.72, 0, Math.PI * 2);
+  ctx.arc(n.rx, n.ry, r * 0.72, 0, Math.PI * 2);
   ctx.fill();
 
   if (n === selected) {
     ctx.strokeStyle = "rgba(255,255,255," + 0.85 * a + ")";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(n.x, n.y, r * 1.55, 0, Math.PI * 2);
+    ctx.arc(n.rx, n.ry, r * 1.55, 0, Math.PI * 2);
     ctx.stroke();
   }
 }
@@ -391,9 +429,9 @@ function drawLabel(n) {
   ctx.textAlign = "center";
   ctx.lineWidth = 3;
   ctx.strokeStyle = "rgba(7,10,20," + 0.85 * n.a + ")";
-  ctx.strokeText(n.name, n.x, n.y + r + 15);
+  ctx.strokeText(n.name, n.rx, n.ry + r + 15);
   ctx.fillStyle = "rgba(235,240,255," + n.a + ")";
-  ctx.fillText(n.name, n.x, n.y + r + 15);
+  ctx.fillText(n.name, n.rx, n.ry + r + 15);
 }
 
 function draw(t) {
@@ -405,7 +443,7 @@ function draw(t) {
   drawDecades();
   drawLinks(t);
   const lo = camY - 90, hi = camY + H + 90;
-  const visible = nodes.filter(n => n.y > lo && n.y < hi);
+  const visible = nodes.filter(n => n.ry > lo && n.ry < hi);
   for (const n of visible) drawNode(n, t);
   ctx.font = "500 12px system-ui, \"Noto Sans TC\", \"PingFang TC\", \"Microsoft JhengHei\", sans-serif";
   for (const n of visible) drawLabel(n);
@@ -432,6 +470,7 @@ function frame(now) {
     clampCam();
   }
   step(now, dtScale);
+  updateGather(now);
   updateTargets();
   draw(now);
   requestAnimationFrame(frame);
@@ -447,7 +486,7 @@ function pick(x, y) {
   let best = null, bd = Infinity;
   for (const n of nodes) {
     if (n.ta < 0.1) continue;
-    const d = Math.hypot(n.x - x, n.y - y);
+    const d = Math.hypot(n.rx - x, n.ry - y);
     if (d < radius(n) * 1.5 + 10 && d < bd) { best = n; bd = d; }
   }
   return best;
@@ -468,7 +507,7 @@ canvas.addEventListener("pointermove", e => {
     if (!moved && Math.hypot(p.x - downPos.x, p.sy - downPos.sy) > 5) moved = true;
     if (!moved) return;
     if (drag) {
-      drag.x = p.x; drag.y = p.y; drag.vx = 0; drag.vy = 0;
+      if (drag.g < 0.05) { drag.x = p.x; drag.y = p.y; drag.vx = 0; drag.vy = 0; }
     } else {
       camY = panStartCam - (p.sy - downPos.sy);
       clampCam();
@@ -530,7 +569,11 @@ function select(n, center) {
   fillChips(document.getElementById("pouts"), n.outs);
   panel.classList.remove("hidden");
   document.getElementById("pbody").scrollTop = 0;
-  if (center) camTarget = Math.max(0, Math.min(Math.max(0, WH - H), n.y - H * 0.32));
+  const sy = n.y - camY;
+  const bottomLimit = window.innerWidth < 760 ? H * 0.42 : H - 200;
+  if (center || sy < headerH + 140 || sy > bottomLimit) {
+    camTarget = Math.max(0, Math.min(Math.max(0, WH - H), n.y - H * 0.3));
+  }
 }
 const closeBtn = document.getElementById("close");
 function closePanel(e) {
@@ -591,7 +634,7 @@ for (const n of nodes) {
 }
 for (let i = 0; i < 350; i++) step(0, 1); // 預先跑一段讓版面先穩定
 updateTargets();
-nodes.forEach(n => { n.a = n.ta; });
+nodes.forEach(n => { n.a = n.ta; n.rx = n.x; n.ry = n.y; });
 requestAnimationFrame(frame);
 </script>
 </body>

@@ -1,13 +1,13 @@
 "use strict";
 
 /*
-  科技脈絡圖 資料檔 V1.1.0
+  科技脈絡圖 資料檔 V1.2.1
   之後要新增技術，只需要改這個檔案：
   1. 在 NODES 加一列：[id, 名稱, 領域, 類別, 年份, 說明]
   2. 在 LINKS 加連線：[前置技術 id, 衍生技術 id]（A 是 B 的基礎）
 */
 window.TECH_DATA = {
-  VERSION: "1.1.0",
+  VERSION: "1.2.1",
 
   DOMAINS: { hw: "硬體", bridge: "介面層", sw: "軟體" },
 
